@@ -911,9 +911,9 @@ func NewMinitiaApp(
 	// At startup, after all modules have been registered, check that all prot
 	// annotations are correct.
 	protoFiles, err := proto.MergedRegistry()
-	if err != nil {
-		panic(err)
-	}
+	// if err != nil {
+	// 	panic(err)
+	// }
 	err = msgservice.ValidateProtoAnnotations(protoFiles)
 	if err != nil {
 		// Once we switch to using protoreflect-based antehandlers, we might

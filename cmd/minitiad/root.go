@@ -42,6 +42,8 @@ import (
 	minitiaapp "github.com/initia-labs/minievm/app"
 
 	opchildcli "github.com/initia-labs/OPinit/x/opchild/client/cli"
+	rollserv "github.com/rollkit/cosmos-sdk-starter/server"
+	rollconf "github.com/rollkit/rollkit/config"
 )
 
 // NewRootCmd creates a new root command for initiad. It is called once in the
@@ -161,6 +163,7 @@ func initRootCmd(rootCmd *cobra.Command, encodingConfig params.EncodingConfig, b
 			sdk.GetConfig().Seal()
 			return nil
 		},
+		StartCommandHandler: rollserv.StartHandler[servertypes.Application],
 	})
 
 	// add keybase, auxiliary RPC, query, and tx child commands
@@ -178,6 +181,7 @@ func initRootCmd(rootCmd *cobra.Command, encodingConfig params.EncodingConfig, b
 
 func addModuleInitFlags(startCmd *cobra.Command) {
 	crisis.AddModuleInitFlags(startCmd)
+	rollconf.AddFlags(startCmd)
 }
 
 func genesisCommand(encodingConfig params.EncodingConfig, basicManager module.BasicManager) *cobra.Command {
