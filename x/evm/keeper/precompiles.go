@@ -8,6 +8,7 @@ import (
 
 	cosmosprecompile "github.com/initia-labs/minievm/x/evm/precompiles/cosmos"
 	erc20registryprecompile "github.com/initia-labs/minievm/x/evm/precompiles/erc20_registry"
+	inferenceprecompile "github.com/initia-labs/minievm/x/evm/precompiles/inference"
 	"github.com/initia-labs/minievm/x/evm/types"
 )
 
@@ -36,6 +37,11 @@ func (k *Keeper) loadPrecompiles() error {
 		return err
 	}
 
+	inferencePrecompile, err := inferenceprecompile.NewInferencePrecompile()
+	if err != nil {
+		return err
+	}
+
 	k.precompiles = precompiles{
 		{
 			addr:     common.BytesToAddress([]byte{0xf1}),
@@ -44,6 +50,10 @@ func (k *Keeper) loadPrecompiles() error {
 		{
 			addr:     common.BytesToAddress([]byte{0xf2}),
 			contract: erc20RegistryPrecompile,
+		},
+		{
+			addr:     common.BytesToAddress([]byte{0x11}),
+			contract: inferencePrecompile,
 		},
 	}
 
