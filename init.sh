@@ -54,7 +54,7 @@ echo -e "\n Your DA_BLOCK_HEIGHT is $DA_BLOCK_HEIGHT \n"
 echo -e "\n Your AUTH_TOKEN is $AUTH_TOKEN \n"
 
 # minitiad init --chain-id=<chain-id> --denom <denom> <moniker>
-minitiad init --chain-id=$L2_CHAIN_ID --denom $DENOM $OPERATOR
+minitiad init --chain-id=$L2_CHAIN_ID --denom $DENOM $OPERATOR --overwrite
 
 # minitiad keys add <key-name>
 minitiad keys add $OPERATOR
