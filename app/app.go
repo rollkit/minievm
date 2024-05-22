@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 
 	"github.com/gorilla/mux"
@@ -15,6 +14,7 @@ import (
 
 	autocliv1 "cosmossdk.io/api/cosmos/autocli/v1"
 	reflectionv1 "cosmossdk.io/api/cosmos/reflection/v1"
+	"cosmossdk.io/core/address"
 	"cosmossdk.io/log"
 	"cosmossdk.io/math"
 	storetypes "cosmossdk.io/store/types"
@@ -130,6 +130,9 @@ import (
 	auctionante "github.com/skip-mev/block-sdk/v2/x/auction/ante"
 	auctionkeeper "github.com/skip-mev/block-sdk/v2/x/auction/keeper"
 	auctiontypes "github.com/skip-mev/block-sdk/v2/x/auction/types"
+	marketmap "github.com/skip-mev/slinky/x/marketmap"
+	marketmapkeeper "github.com/skip-mev/slinky/x/marketmap/keeper"
+	marketmaptypes "github.com/skip-mev/slinky/x/marketmap/types"
 	"github.com/skip-mev/slinky/x/oracle"
 	oraclekeeper "github.com/skip-mev/slinky/x/oracle/keeper"
 	oracletypes "github.com/skip-mev/slinky/x/oracle/types"
@@ -151,6 +154,15 @@ import (
 	forwarding "github.com/noble-assets/forwarding/x/forwarding"
 	forwardingkeeper "github.com/noble-assets/forwarding/x/forwarding/keeper"
 	forwardingtypes "github.com/noble-assets/forwarding/x/forwarding/types"
+
+	// kvindexer
+	indexer "github.com/initia-labs/kvindexer"
+	indexerconfig "github.com/initia-labs/kvindexer/config"
+	blocksubmodule "github.com/initia-labs/kvindexer/submodules/block"
+	"github.com/initia-labs/kvindexer/submodules/pair"
+	tx "github.com/initia-labs/kvindexer/submodules/tx"
+	indexermodule "github.com/initia-labs/kvindexer/x/kvindexer"
+	indexerkeeper "github.com/initia-labs/kvindexer/x/kvindexer/keeper"
 
 	// unnamed import of statik for swagger UI support
 	_ "github.com/initia-labs/minievm/client/docs/statik"
@@ -229,6 +241,7 @@ type MinitiaApp struct {
 	AuctionKeeper         *auctionkeeper.Keeper // x/auction keeper used to process bids for POB auctions
 	PacketForwardKeeper   *packetforwardkeeper.Keeper
 	OracleKeeper          *oraclekeeper.Keeper // x/oracle keeper used for the slinky oracle
+	MarketMapKeeper       *marketmapkeeper.Keeper
 	IBCHooksKeeper        *ibchookskeeper.Keeper
 	ForwardingKeeper      *forwardingkeeper.Keeper
 
@@ -249,6 +262,10 @@ type MinitiaApp struct {
 
 	// Override of BaseApp's CheckTx
 	checkTxHandler blockchecktx.CheckTx
+
+	// fake keeper to indexer
+	indexerKeeper *indexerkeeper.Keeper
+	indexerModule indexermodule.AppModuleBasic
 }
 
 // NewMinitiaApp returns a reference to an initialized Initia.
@@ -284,7 +301,7 @@ func NewMinitiaApp(
 		icahosttypes.StoreKey, icacontrollertypes.StoreKey, icaauthtypes.StoreKey,
 		ibcfeetypes.StoreKey, evmtypes.StoreKey, opchildtypes.StoreKey,
 		auctiontypes.StoreKey, packetforwardtypes.StoreKey, oracletypes.StoreKey,
-		ibchookstypes.StoreKey, forwardingtypes.StoreKey,
+		marketmaptypes.StoreKey, ibchookstypes.StoreKey, forwardingtypes.StoreKey,
 	)
 	tkeys := storetypes.NewTransientStoreKeys(forwardingtypes.TransientStoreKey)
 	memKeys := storetypes.NewMemoryStoreKeys(capabilitytypes.MemStoreKey)
@@ -366,13 +383,24 @@ func NewMinitiaApp(
 	////////////////////////////////
 
 	// initialize oracle keeper
+	marketMapKeeper := marketmapkeeper.NewKeeper(
+		runtime.NewKVStoreService(keys[marketmaptypes.StoreKey]),
+		appCodec,
+		authorityAccAddr,
+	)
+	app.MarketMapKeeper = marketMapKeeper
+
 	oracleKeeper := oraclekeeper.NewKeeper(
 		runtime.NewKVStoreService(keys[oracletypes.StoreKey]),
 		appCodec,
-		nil,
+		marketMapKeeper,
 		authorityAccAddr,
 	)
 	app.OracleKeeper = &oracleKeeper
+
+	// Add the oracle keeper as a hook to market map keeper so new market map entries can be created
+	// and propogated to the oracle keeper.
+	app.MarketMapKeeper.SetHooks(app.OracleKeeper.Hooks())
 
 	app.OPChildKeeper = opchildkeeper.NewKeeper(
 		appCodec,
@@ -719,7 +747,12 @@ func NewMinitiaApp(
 		forwarding.NewAppModule(app.ForwardingKeeper),
 		// slinky modules
 		oracle.NewAppModule(appCodec, *app.OracleKeeper),
+		marketmap.NewAppModule(appCodec, app.MarketMapKeeper),
 	)
+
+	if err := app.setupIndexer(appOpts, homePath, ac, vc, appCodec); err != nil {
+		panic(err)
+	}
 
 	// BasicModuleManager defines the module BasicManager is in charge of setting up basic,
 	// non-dependant module elements, such as codec registration and genesis verification.
@@ -748,6 +781,7 @@ func NewMinitiaApp(
 		authz.ModuleName,
 		ibcexported.ModuleName,
 		oracletypes.ModuleName,
+		marketmaptypes.ModuleName,
 	)
 
 	app.ModuleManager.SetOrderEndBlockers(
@@ -756,6 +790,7 @@ func NewMinitiaApp(
 		feegrant.ModuleName,
 		group.ModuleName,
 		oracletypes.ModuleName,
+		marketmaptypes.ModuleName,
 		forwardingtypes.ModuleName,
 	)
 
@@ -769,9 +804,8 @@ func NewMinitiaApp(
 		opchildtypes.ModuleName, genutiltypes.ModuleName, authz.ModuleName, group.ModuleName,
 		upgradetypes.ModuleName, feegrant.ModuleName, consensusparamtypes.ModuleName, ibcexported.ModuleName,
 		ibctransfertypes.ModuleName, ibcnfttransfertypes.ModuleName, icatypes.ModuleName, icaauthtypes.ModuleName,
-		ibcfeetypes.ModuleName, auctiontypes.ModuleName, oracletypes.ModuleName,
-		packetforwardtypes.ModuleName, forwardingtypes.ModuleName,
-		ibchookstypes.ModuleName,
+		ibcfeetypes.ModuleName, auctiontypes.ModuleName, oracletypes.ModuleName, marketmaptypes.ModuleName,
+		packetforwardtypes.ModuleName, forwardingtypes.ModuleName, ibchookstypes.ModuleName,
 	}
 
 	app.ModuleManager.SetOrderInitGenesis(genesisModuleOrder...)
@@ -785,6 +819,7 @@ func NewMinitiaApp(
 	if err != nil {
 		panic(err)
 	}
+	app.indexerModule.RegisterServices(app.configurator)
 
 	// register upgrade handler for later use
 	app.RegisterUpgradeHandlers(app.configurator)
@@ -1102,6 +1137,9 @@ func (app *MinitiaApp) RegisterAPIRoutes(apiSvr *api.Server, apiConfig config.AP
 	// Register grpc-gateway routes for all modules.
 	app.BasicModuleManager.RegisterGRPCGatewayRoutes(clientCtx, apiSvr.GRPCGatewayRouter)
 
+	// Register grpc-gateway routes for indexer module.
+	app.indexerModule.RegisterGRPCGatewayRoutes(clientCtx, apiSvr.GRPCGatewayRouter)
+
 	// register swagger API from root so that other applications can override easily
 	if apiConfig.Swagger {
 		RegisterSwaggerAPI(apiSvr.Router)
@@ -1200,13 +1238,6 @@ func (app *MinitiaApp) TxConfig() client.TxConfig {
 	return app.txConfig
 }
 
-// ChainID gets chainID from private fields of BaseApp
-// Should be removed once SDK 0.50.x will be adopted
-func (app *MinitiaApp) ChainID() string { // TODO: remove this method once chain updates to v0.50.x
-	field := reflect.ValueOf(app.BaseApp).Elem().FieldByName("chainID")
-	return field.String()
-}
-
 // allow 20 and 32 bytes address
 func VerifyAddressLen() func(addr []byte) error {
 	return func(addr []byte) error {
@@ -1216,4 +1247,91 @@ func VerifyAddressLen() func(addr []byte) error {
 		}
 		return nil
 	}
+}
+
+func (app *MinitiaApp) setupIndexer(appOpts servertypes.AppOptions, homePath string, ac, vc address.Codec, appCodec codec.Codec) error {
+	// initialize the indexer fake-keeper
+	indexerConfig, err := indexerconfig.NewConfig(appOpts)
+	if err != nil {
+		panic(err)
+	}
+	app.indexerKeeper = indexerkeeper.NewKeeper(
+		appCodec,
+		"evm",
+		homePath,
+		indexerConfig,
+		ac,
+		vc,
+	)
+
+	smBlock, err := blocksubmodule.NewBlockSubmodule(appCodec, app.indexerKeeper, app.OPChildKeeper)
+	if err != nil {
+		panic(err)
+	}
+	smTx, err := tx.NewTxSubmodule(appCodec, app.indexerKeeper)
+	if err != nil {
+		panic(err)
+	}
+	smPair, err := pair.NewPairSubmodule(appCodec, app.indexerKeeper, app.IBCKeeper.ChannelKeeper, app.TransferKeeper)
+	if err != nil {
+		panic(err)
+	}
+	/*
+			smNft, err := nft.NewMoveNftSubmodule(ac, appCodec, app.indexerKeeper, app.EvmKeeper, smPair)
+			if err != nil {
+				panic(err)
+			}
+		err = app.indexerKeeper.RegisterSubmodules(smBlock, smTx, smPair, smNft)
+	*/
+	err = app.indexerKeeper.RegisterSubmodules(smBlock, smTx, smPair)
+	if err != nil {
+		panic(err)
+	}
+	app.indexerModule = indexermodule.NewAppModuleBasic(app.indexerKeeper)
+	// Add your implementation here
+
+	indexer, err := indexer.NewIndexer(app.GetBaseApp().Logger(), app.indexerKeeper)
+	if err != nil || indexer == nil {
+		return nil
+	}
+
+	if err = indexer.Validate(); err != nil {
+		return err
+	}
+
+	if err = indexer.Prepare(nil); err != nil {
+		return err
+	}
+
+	if err = app.indexerKeeper.Seal(); err != nil {
+		return err
+	}
+
+	if err = indexer.Start(nil); err != nil {
+		return err
+	}
+
+	streamingManager := storetypes.StreamingManager{
+		ABCIListeners: []storetypes.ABCIListener{indexer},
+		StopNodeOnErr: true,
+	}
+	app.SetStreamingManager(streamingManager)
+
+	return nil
+}
+
+// Close closes the underlying baseapp, the oracle service, and the prometheus server if required.
+// This method blocks on the closure of both the prometheus server, and the oracle-service
+func (app *MinitiaApp) Close() error {
+	if app.indexerKeeper != nil {
+		if err := app.indexerKeeper.Close(); err != nil {
+			return err
+		}
+	}
+
+	if err := app.BaseApp.Close(); err != nil {
+		return err
+	}
+
+	return nil
 }
