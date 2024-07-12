@@ -22,6 +22,7 @@ type Keeper struct {
 	storeService corestoretypes.KVStoreService
 
 	accountKeeper       types.AccountKeeper
+	bankKeeper          types.BankKeeper
 	communityPoolKeeper types.CommunityPoolKeeper
 	erc20Keeper         types.IERC20Keeper
 	erc20StoresKeeper   types.IERC20StoresKeeper
@@ -55,6 +56,9 @@ type Keeper struct {
 
 	precompiles          precompiles
 	queryCosmosWhitelist types.QueryCosmosWhitelist
+
+	// flag to check if the keeper is in the process of initialization
+	initializing bool
 }
 
 func NewKeeper(
@@ -62,6 +66,7 @@ func NewKeeper(
 	cdc codec.Codec,
 	storeService corestoretypes.KVStoreService,
 	accountKeeper types.AccountKeeper,
+	bankKeeper types.BankKeeper,
 	communityPoolKeeper types.CommunityPoolKeeper,
 	msgRouter baseapp.MessageRouter,
 	grpcRouter *baseapp.GRPCQueryRouter,
@@ -75,16 +80,13 @@ func NewKeeper(
 		evmConfig.ContractSimulationGasLimit = evmconfig.DefaultContractSimulationGasLimit
 	}
 
-	if evmConfig.ContractQueryGasLimit == 0 {
-		evmConfig.ContractQueryGasLimit = evmconfig.DefaultContractQueryGasLimit
-	}
-
 	k := &Keeper{
 		ac:           ac,
 		cdc:          cdc,
 		storeService: storeService,
 
 		accountKeeper:       accountKeeper,
+		bankKeeper:          bankKeeper,
 		communityPoolKeeper: communityPoolKeeper,
 
 		msgRouter:  msgRouter,

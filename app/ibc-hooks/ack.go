@@ -8,6 +8,7 @@ import (
 	nfttransfertypes "github.com/initia-labs/initia/x/ibc/nft-transfer/types"
 
 	ibchooks "github.com/initia-labs/initia/x/ibc-hooks"
+	"github.com/initia-labs/initia/x/ibc-hooks/types"
 	evmtypes "github.com/initia-labs/minievm/x/evm/types"
 )
 
@@ -27,30 +28,65 @@ func (h EVMHooks) onAckIcs20Packet(
 	if !isEVMRouted || hookData.AsyncCallback == nil {
 		return nil
 	} else if err != nil {
-		return err
+		h.evmKeeper.Logger(ctx).Error("failed to parse memo", "error", err)
+		ctx.EventManager().EmitEvent(sdk.NewEvent(
+			types.EventTypeHookFailed,
+			sdk.NewAttribute(types.AttributeKeyReason, "failed to parse memo"),
+			sdk.NewAttribute(types.AttributeKeyError, err.Error()),
+		))
+
+		return nil
 	}
 
+	// create a new cache context to ignore errors during
+	// the execution of the callback
+	cacheCtx, write := ctx.CacheContext()
+
 	callback := hookData.AsyncCallback
-	if allowed, err := h.checkACL(im, ctx, callback.ContractAddress); err != nil {
-		return err
+	if allowed, err := h.checkACL(im, cacheCtx, callback.ContractAddress); err != nil {
+		h.evmKeeper.Logger(cacheCtx).Error("failed to check ACL", "error", err)
+		ctx.EventManager().EmitEvent(sdk.NewEvent(
+			types.EventTypeHookFailed,
+			sdk.NewAttribute(types.AttributeKeyReason, "failed to check ACL"),
+			sdk.NewAttribute(types.AttributeKeyError, err.Error()),
+		))
+
+		return nil
 	} else if !allowed {
-		// just return nil here to avoid packet stuck due to hook acl.
+		h.evmKeeper.Logger(cacheCtx).Error("failed to check ACL", "not allowed")
+		ctx.EventManager().EmitEvent(sdk.NewEvent(
+			types.EventTypeHookFailed,
+			sdk.NewAttribute(types.AttributeKeyReason, "failed to check ACL"),
+			sdk.NewAttribute(types.AttributeKeyError, "not allowed"),
+		))
+
 		return nil
 	}
 
 	inputBz, err := h.asyncCallbackABI.Pack(functionNameAck, callback.Id, !isAckError(h.codec, acknowledgement))
 	if err != nil {
-		return err
+		h.evmKeeper.Logger(cacheCtx).Error("failed to pack input", "error", err)
+		return nil
 	}
 
-	_, err = h.execMsg(ctx, &evmtypes.MsgCall{
+	_, err = h.execMsg(cacheCtx, &evmtypes.MsgCall{
 		Sender:       data.Sender,
 		ContractAddr: callback.ContractAddress,
 		Input:        hexutil.Encode(inputBz),
 	})
 	if err != nil {
-		return err
+		h.evmKeeper.Logger(cacheCtx).Error("failed to execute callback", "error", err)
+		ctx.EventManager().EmitEvent(sdk.NewEvent(
+			types.EventTypeHookFailed,
+			sdk.NewAttribute(types.AttributeKeyReason, "failed to execute callback"),
+			sdk.NewAttribute(types.AttributeKeyError, err.Error()),
+		))
+
+		return nil
 	}
+
+	// write the cache context only if the callback execution was successful
+	write()
 
 	return nil
 }
@@ -71,29 +107,65 @@ func (h EVMHooks) onAckIcs721Packet(
 	if !isEVMRouted || hookData.AsyncCallback == nil {
 		return nil
 	} else if err != nil {
-		return err
+		h.evmKeeper.Logger(ctx).Error("failed to parse memo", "error", err)
+		ctx.EventManager().EmitEvent(sdk.NewEvent(
+			types.EventTypeHookFailed,
+			sdk.NewAttribute(types.AttributeKeyReason, "failed to parse memo"),
+			sdk.NewAttribute(types.AttributeKeyError, err.Error()),
+		))
+
+		return nil
 	}
 
+	// create a new cache context to ignore errors during
+	// the execution of the callback
+	cacheCtx, write := ctx.CacheContext()
+
 	callback := hookData.AsyncCallback
-	if allowed, err := h.checkACL(im, ctx, callback.ContractAddress); err != nil {
-		return err
+	if allowed, err := h.checkACL(im, cacheCtx, callback.ContractAddress); err != nil {
+		h.evmKeeper.Logger(cacheCtx).Error("failed to check ACL", "error", err)
+		ctx.EventManager().EmitEvent(sdk.NewEvent(
+			types.EventTypeHookFailed,
+			sdk.NewAttribute(types.AttributeKeyReason, "failed to check ACL"),
+			sdk.NewAttribute(types.AttributeKeyError, err.Error()),
+		))
+
+		return nil
 	} else if !allowed {
+		h.evmKeeper.Logger(cacheCtx).Error("failed to check ACL", "not allowed")
+		ctx.EventManager().EmitEvent(sdk.NewEvent(
+			types.EventTypeHookFailed,
+			sdk.NewAttribute(types.AttributeKeyReason, "failed to check ACL"),
+			sdk.NewAttribute(types.AttributeKeyError, "not allowed"),
+		))
+
 		return nil
 	}
 
 	inputBz, err := h.asyncCallbackABI.Pack(functionNameAck, callback.Id, !isAckError(h.codec, acknowledgement))
 	if err != nil {
-		return err
+		h.evmKeeper.Logger(cacheCtx).Error("failed to pack input", "error", err)
+		return nil
 	}
 
-	_, err = h.execMsg(ctx, &evmtypes.MsgCall{
+	_, err = h.execMsg(cacheCtx, &evmtypes.MsgCall{
 		Sender:       data.Sender,
 		ContractAddr: callback.ContractAddress,
 		Input:        hexutil.Encode(inputBz),
 	})
 	if err != nil {
-		return err
+		h.evmKeeper.Logger(cacheCtx).Error("failed to execute callback", "error", err)
+		ctx.EventManager().EmitEvent(sdk.NewEvent(
+			types.EventTypeHookFailed,
+			sdk.NewAttribute(types.AttributeKeyReason, "failed to execute callback"),
+			sdk.NewAttribute(types.AttributeKeyError, err.Error()),
+		))
+
+		return nil
 	}
+
+	// write the cache context only if the callback execution was successful
+	write()
 
 	return nil
 }

@@ -21,7 +21,6 @@ import (
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 
 	opchildtypes "github.com/initia-labs/OPinit/x/opchild/types"
-	"github.com/initia-labs/minievm/types"
 
 	evmconfig "github.com/initia-labs/minievm/x/evm/config"
 )
@@ -57,6 +56,7 @@ func setup(db *dbm.DB, withGenesis bool) (*MinitiaApp, GenesisState) {
 	app := NewMinitiaApp(
 		log.NewNopLogger(),
 		getOrCreateMemDB(db),
+		dbm.NewMemDB(),
 		nil,
 		true,
 		evmconfig.DefaultEVMConfig(),
@@ -64,7 +64,7 @@ func setup(db *dbm.DB, withGenesis bool) (*MinitiaApp, GenesisState) {
 	)
 
 	if withGenesis {
-		return app, NewDefaultGenesisState(encCdc.Codec, app.BasicModuleManager, types.BaseDenom)
+		return app, NewDefaultGenesisState(encCdc.Codec, app.BasicModuleManager, sdk.DefaultBondDenom)
 	}
 
 	return app, GenesisState{}
@@ -126,7 +126,7 @@ func SetupWithGenesisAccounts(
 	var opchildGenesis opchildtypes.GenesisState
 	app.AppCodec().MustUnmarshalJSON(genesisState[opchildtypes.ModuleName], &opchildGenesis)
 	opchildGenesis.Params.Admin = sdk.AccAddress(valSet.Validators[0].Address.Bytes()).String()
-	opchildGenesis.Params.BridgeExecutor = sdk.AccAddress(valSet.Validators[0].Address.Bytes()).String()
+	opchildGenesis.Params.BridgeExecutors = []string{sdk.AccAddress(valSet.Validators[0].Address.Bytes()).String()}
 
 	// set validators and delegations
 	opchildGenesis = *opchildtypes.NewGenesisState(opchildGenesis.Params, validators, nil)

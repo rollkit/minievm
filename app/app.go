@@ -100,8 +100,10 @@ import (
 
 	// initia imports
 
+	appheaderinfo "github.com/initia-labs/initia/app/header_info"
 	initialanes "github.com/initia-labs/initia/app/lanes"
 	"github.com/initia-labs/initia/app/params"
+	cryptocodec "github.com/initia-labs/initia/crypto/codec"
 	ibchooks "github.com/initia-labs/initia/x/ibc-hooks"
 	ibchookskeeper "github.com/initia-labs/initia/x/ibc-hooks/keeper"
 	ibchookstypes "github.com/initia-labs/initia/x/ibc-hooks/types"
@@ -143,6 +145,7 @@ import (
 	ibcevmhooks "github.com/initia-labs/minievm/app/ibc-hooks"
 	appkeepers "github.com/initia-labs/minievm/app/keepers"
 
+	evmindexer "github.com/initia-labs/minievm/indexer"
 	"github.com/initia-labs/minievm/x/bank"
 	bankkeeper "github.com/initia-labs/minievm/x/bank/keeper"
 	"github.com/initia-labs/minievm/x/evm"
@@ -151,9 +154,9 @@ import (
 
 	// noble forwarding keeper
 	evmtypes "github.com/initia-labs/minievm/x/evm/types"
-	forwarding "github.com/noble-assets/forwarding/x/forwarding"
-	forwardingkeeper "github.com/noble-assets/forwarding/x/forwarding/keeper"
-	forwardingtypes "github.com/noble-assets/forwarding/x/forwarding/types"
+	forwarding "github.com/noble-assets/forwarding/v2/x/forwarding"
+	forwardingkeeper "github.com/noble-assets/forwarding/v2/x/forwarding/keeper"
+	forwardingtypes "github.com/noble-assets/forwarding/v2/x/forwarding/types"
 
 	// kvindexer
 	indexer "github.com/initia-labs/kvindexer"
@@ -266,21 +269,34 @@ type MinitiaApp struct {
 	// fake keeper to indexer
 	indexerKeeper *indexerkeeper.Keeper
 	indexerModule indexermodule.AppModuleBasic
+
+	// evm indexer
+	evmIndexer evmindexer.EVMIndexer
 }
 
 // NewMinitiaApp returns a reference to an initialized Initia.
 func NewMinitiaApp(
 	logger log.Logger,
 	db dbm.DB,
+	indexerDB dbm.DB,
 	traceStore io.Writer,
 	loadLatest bool,
 	evmConfig evmconfig.EVMConfig,
 	appOpts servertypes.AppOptions,
 	baseAppOptions ...func(*baseapp.BaseApp),
 ) *MinitiaApp {
+	// load the configs
+	mempoolTxs := cast.ToInt(appOpts.Get(server.FlagMempoolMaxTxs))
+	queryGasLimit := cast.ToInt(appOpts.Get(server.FlagQueryGasLimit))
+
+	logger.Info("mempool max txs", "max_txs", mempoolTxs)
+	logger.Info("query gas limit", "gas_limit", queryGasLimit)
+
 	encodingConfig := params.MakeEncodingConfig()
 	std.RegisterLegacyAminoCodec(encodingConfig.Amino)
 	std.RegisterInterfaces(encodingConfig.InterfaceRegistry)
+	cryptocodec.RegisterLegacyAminoCodec(encodingConfig.Amino)
+	cryptocodec.RegisterInterfaces(encodingConfig.InterfaceRegistry)
 
 	appCodec := encodingConfig.Codec
 	legacyAmino := encodingConfig.Amino
@@ -494,6 +510,8 @@ func NewMinitiaApp(
 		app.Logger(),
 		runtime.NewKVStoreService(keys[forwardingtypes.StoreKey]),
 		runtime.NewTransientStoreService(tkeys[forwardingtypes.TransientStoreKey]),
+		appheaderinfo.NewHeaderInfoService(),
+		authorityAddr,
 		app.AccountKeeper,
 		app.BankKeeper,
 		app.IBCKeeper.ChannelKeeper,
@@ -687,6 +705,7 @@ func NewMinitiaApp(
 		appCodec,
 		runtime.NewKVStoreService(keys[evmtypes.StoreKey]),
 		accountKeeper,
+		bankKeeper,
 		communityPoolKeeper,
 		app.MsgServiceRouter(),
 		app.GRPCQueryRouter(),
@@ -750,7 +769,7 @@ func NewMinitiaApp(
 		marketmap.NewAppModule(appCodec, app.MarketMapKeeper),
 	)
 
-	if err := app.setupIndexer(appOpts, homePath, ac, vc, appCodec); err != nil {
+	if err := app.setupIndexer(indexerDB, appOpts, homePath, ac, vc, appCodec); err != nil {
 		panic(err)
 	}
 
@@ -853,7 +872,7 @@ func NewMinitiaApp(
 		Logger:          app.Logger(),
 		TxEncoder:       app.txConfig.TxEncoder(),
 		TxDecoder:       app.txConfig.TxDecoder(),
-		MaxBlockSpace:   math.LegacyMustNewDecFromStr("0.05"),
+		MaxBlockSpace:   math.LegacyMustNewDecFromStr("0.01"),
 		MaxTxs:          1,
 		SignerExtractor: signerExtractor,
 	}, opchildlanes.SystemLaneMatchHandler())
@@ -863,7 +882,7 @@ func NewMinitiaApp(
 		Logger:          app.Logger(),
 		TxEncoder:       app.txConfig.TxEncoder(),
 		TxDecoder:       app.txConfig.TxDecoder(),
-		MaxBlockSpace:   math.LegacyMustNewDecFromStr("0.15"),
+		MaxBlockSpace:   math.LegacyMustNewDecFromStr("0.09"),
 		MaxTxs:          100,
 		SignerExtractor: signerExtractor,
 	}, factory, factory.MatchHandler())
@@ -872,7 +891,7 @@ func NewMinitiaApp(
 		Logger:          app.Logger(),
 		TxEncoder:       app.txConfig.TxEncoder(),
 		TxDecoder:       app.txConfig.TxDecoder(),
-		MaxBlockSpace:   math.LegacyMustNewDecFromStr("0.2"),
+		MaxBlockSpace:   math.LegacyMustNewDecFromStr("0.1"),
 		MaxTxs:          100,
 		SignerExtractor: signerExtractor,
 	}, opchildlanes.NewFreeLaneMatchHandler(ac, app.OPChildKeeper).MatchHandler())
@@ -881,8 +900,8 @@ func NewMinitiaApp(
 		Logger:          app.Logger(),
 		TxEncoder:       app.txConfig.TxEncoder(),
 		TxDecoder:       app.txConfig.TxDecoder(),
-		MaxBlockSpace:   math.LegacyMustNewDecFromStr("0.6"),
-		MaxTxs:          1000,
+		MaxBlockSpace:   math.LegacyMustNewDecFromStr("0.8"),
+		MaxTxs:          mempoolTxs,
 		SignerExtractor: signerExtractor,
 	})
 
@@ -892,7 +911,8 @@ func NewMinitiaApp(
 		panic(err)
 	}
 
-	app.SetMempool(mempool)
+	// wrap mempool to receive pending txs from the indexer
+	app.SetMempool(app.evmIndexer.MempoolWrapper(mempool))
 	anteHandler := app.setAnteHandler(mevLane, freeLane)
 
 	// NOTE seems this optional, to reduce mempool logic cost
@@ -1014,6 +1034,7 @@ func (app *MinitiaApp) setAnteHandler(
 			AuctionKeeper: *app.AuctionKeeper,
 			MevLane:       mevLane,
 			FreeLane:      freeLane,
+			EVMKeeper:     app.EVMKeeper,
 		},
 	)
 	if err != nil {
@@ -1249,11 +1270,11 @@ func VerifyAddressLen() func(addr []byte) error {
 	}
 }
 
-func (app *MinitiaApp) setupIndexer(appOpts servertypes.AppOptions, homePath string, ac, vc address.Codec, appCodec codec.Codec) error {
+func (app *MinitiaApp) setupIndexer(indexerDB dbm.DB, appOpts servertypes.AppOptions, homePath string, ac, vc address.Codec, appCodec codec.Codec) error {
 	// initialize the indexer fake-keeper
 	indexerConfig, err := indexerconfig.NewConfig(appOpts)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	app.indexerKeeper = indexerkeeper.NewKeeper(
 		appCodec,
@@ -1266,56 +1287,66 @@ func (app *MinitiaApp) setupIndexer(appOpts servertypes.AppOptions, homePath str
 
 	smBlock, err := blocksubmodule.NewBlockSubmodule(appCodec, app.indexerKeeper, app.OPChildKeeper)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	smTx, err := tx.NewTxSubmodule(appCodec, app.indexerKeeper)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	smPair, err := pair.NewPairSubmodule(appCodec, app.indexerKeeper, app.IBCKeeper.ChannelKeeper, app.TransferKeeper)
 	if err != nil {
-		panic(err)
+		return err
 	}
-	/*
-			smNft, err := nft.NewMoveNftSubmodule(ac, appCodec, app.indexerKeeper, app.EvmKeeper, smPair)
-			if err != nil {
-				panic(err)
-			}
-		err = app.indexerKeeper.RegisterSubmodules(smBlock, smTx, smPair, smNft)
-	*/
+
 	err = app.indexerKeeper.RegisterSubmodules(smBlock, smTx, smPair)
 	if err != nil {
-		panic(err)
+		return err
 	}
+
 	app.indexerModule = indexermodule.NewAppModuleBasic(app.indexerKeeper)
+
 	// Add your implementation here
 
 	indexer, err := indexer.NewIndexer(app.GetBaseApp().Logger(), app.indexerKeeper)
-	if err != nil || indexer == nil {
+	if err != nil {
 		return nil
 	}
 
-	if err = indexer.Validate(); err != nil {
+	liseners := []storetypes.ABCIListener{}
+	if indexer != nil {
+		if err = indexer.Validate(); err != nil {
+			return err
+		}
+
+		if err = indexer.Prepare(nil); err != nil {
+			return err
+		}
+
+		if err = app.indexerKeeper.Seal(); err != nil {
+			return err
+		}
+
+		if err = indexer.Start(nil); err != nil {
+			return err
+		}
+
+		liseners = append(liseners, indexer)
+	}
+
+	// add evm indexer
+	evmIndexer, err := evmindexer.NewEVMIndexer(indexerDB, appCodec, app.Logger(), app.txConfig, app.EVMKeeper)
+	if err != nil {
 		return err
 	}
 
-	if err = indexer.Prepare(nil); err != nil {
-		return err
-	}
+	// register evm indexer to app
+	app.evmIndexer = evmIndexer
+	liseners = append(liseners, evmIndexer)
 
-	if err = app.indexerKeeper.Seal(); err != nil {
-		return err
-	}
-
-	if err = indexer.Start(nil); err != nil {
-		return err
-	}
-
-	streamingManager := storetypes.StreamingManager{
-		ABCIListeners: []storetypes.ABCIListener{indexer},
+	app.SetStreamingManager(storetypes.StreamingManager{
+		ABCIListeners: liseners,
 		StopNodeOnErr: true,
-	}
-	app.SetStreamingManager(streamingManager)
+	})
 
 	return nil
 }
@@ -1334,4 +1365,16 @@ func (app *MinitiaApp) Close() error {
 	}
 
 	return nil
+}
+
+// IndexerKeeper returns the evm indexer
+func (app *MinitiaApp) EVMIndexer() evmindexer.EVMIndexer {
+	return app.evmIndexer
+}
+
+// CheckStateContextGetter returns a function that returns a new Context for state checking.
+func (app *MinitiaApp) CheckStateContextGetter() func() sdk.Context {
+	return func() sdk.Context {
+		return app.GetContextForCheckTx(nil)
+	}
 }

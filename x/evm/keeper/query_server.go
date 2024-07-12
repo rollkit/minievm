@@ -6,8 +6,8 @@ import (
 	"strings"
 
 	errorsmod "cosmossdk.io/errors"
-	storetypes "cosmossdk.io/store/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/holiman/uint256"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -34,21 +34,33 @@ func (qs *queryServerImpl) Call(ctx context.Context, req *types.QueryCallRequest
 	}()
 
 	sdkCtx := sdk.UnwrapSDKContext(ctx)
-	sdkCtx = sdkCtx.WithGasMeter(storetypes.NewGasMeter(qs.config.ContractQueryGasLimit))
 
-	sender, err := qs.ac.StringToBytes(req.Sender)
-	if err != nil {
-		return nil, err
+	caller := common.Address{}
+	if req.Sender != "" {
+		senderBz, err := qs.ac.StringToBytes(req.Sender)
+		if err != nil {
+			return nil, err
+		}
+
+		caller = common.BytesToAddress(senderBz)
 	}
 
-	contractAddr, err := types.ContractAddressFromString(qs.ac, req.ContractAddr)
-	if err != nil {
-		return nil, err
+	contractAddr := common.Address{}
+	if req.ContractAddr != "" {
+		contractAddr, err = types.ContractAddressFromString(qs.ac, req.ContractAddr)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	inputBz, err := hexutil.Decode(req.Input)
 	if err != nil {
 		return nil, err
+	}
+
+	value, overflow := uint256.FromBig(req.Value.BigInt())
+	if overflow {
+		return nil, types.ErrInvalidValue.Wrap("value is out of range")
 	}
 
 	var tracer *tracing.Hooks
@@ -64,8 +76,17 @@ func (qs *queryServerImpl) Call(ctx context.Context, req *types.QueryCallRequest
 
 	// use cache context to rollback writes
 	sdkCtx, _ = sdkCtx.CacheContext()
-	caller := common.BytesToAddress(sender)
-	retBz, logs, err := qs.EVMCallWithTracer(sdkCtx, caller, contractAddr, inputBz, tracer)
+
+	var retBz []byte
+	var logs []types.Log
+	if contractAddr == (common.Address{}) {
+		// if contract address is not provided, then it's a contract creation
+		retBz, _, logs, err = qs.EVMCreateWithTracer(sdkCtx, caller, inputBz, value, nil, tracer)
+	} else {
+		retBz, logs, err = qs.EVMCallWithTracer(sdkCtx, caller, contractAddr, inputBz, value, tracer)
+
+	}
+
 	if err != nil {
 		return &types.QueryCallResponse{
 			Error:       err.Error(),

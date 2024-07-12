@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-interface IERC20 {
+import {IERC165} from "../i_erc165/IERC165.sol";
+
+interface IERC20 is IERC165 {
     function name() external view returns (string memory);
     function symbol() external view returns (string memory);
     function decimals() external view returns (uint8);
@@ -22,4 +24,11 @@ interface IERC20 {
         address recipient,
         uint256 amount
     ) external returns (bool);
+
+    // Custom ERC20 contracts also should have sudo transfer method
+    function sudoTransfer(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) external;
 }
